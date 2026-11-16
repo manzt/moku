@@ -3,19 +3,25 @@
  *
  * @module
  */
-import type { Source } from "@moku/core/Notebook";
+import type * as Notebook from "@moku/core/Notebook";
 import type * as Protocol from "@moku/core/Protocol";
 import { Atom, type AtomRegistry } from "effect/reactivity";
 import * as Draft from "./draft.ts";
 import { editDocument, type Edit } from "./edit.ts";
 
+/** Confirmed source and whether the current connection permits editing. */
+export interface Source {
+  readonly document: Notebook.Document | null;
+  readonly canEdit: boolean;
+}
+
 /**
  * The captured draft and immutable request for one synchronization attempt.
  */
 export interface Submission {
-  readonly request: Protocol.EditRequest;
+  readonly edit: Notebook.Edit;
   readonly draft: Draft.Draft;
-  readonly response: Protocol.DocumentOutput | null;
+  readonly response: typeof Protocol.Document.Type | null;
 }
 
 interface State {
@@ -31,7 +37,7 @@ export interface Interface {
   readonly capture: () => Submission | null;
   readonly settle: (
     submission: Submission,
-    response: Protocol.DocumentOutput | null,
+    response: typeof Protocol.Document.Type | null,
   ) => void;
   readonly dispose: () => void;
 }
@@ -40,7 +46,7 @@ function reconcile(state: State): State {
   const confirmed = state.source.document;
   if (!confirmed) return state;
   const response = state.pending?.response;
-  if (response && confirmed.revision.version >= response.version) {
+  if (response && confirmed.version >= response.version) {
     state = {
       ...state,
       draft: Draft.acknowledge(state.draft, state.pending!.draft),
@@ -65,7 +71,7 @@ export function makeState(
   notebookId: string,
 ): Interface {
   const initial = registry.get(source);
-  if (initial.document && initial.document.revision.notebook_id !== notebookId) {
+  if (initial.document && initial.document.notebook_id !== notebookId) {
     throw new Error("Document source belongs to another notebook");
   }
   const state = Atom.make<State>({
@@ -77,7 +83,7 @@ export function makeState(
   let closed = false;
   let editing = false;
   const unsubscribe = registry.subscribe(source, (next) => {
-    if (next.document && next.document.revision.notebook_id !== notebookId) {
+    if (next.document && next.document.notebook_id !== notebookId) {
       throw new Error("Document source belongs to another notebook");
     }
     registry.update(state, (current) =>
@@ -120,25 +126,27 @@ export function makeState(
       const current = registry.get(state);
       if (!current.source.document || !current.source.canEdit || current.pending)
         return null;
-      const changes = Draft.toChanges(current.source.document, current.draft);
-      if (changes === null) return null;
-      if (changes.length === 0) {
+      const edits = Draft.toEdits(current.source.document, current.draft);
+      if (edits === null) return null;
+      if (edits.length === 0) {
         if (!Draft.isEmptyDraft(current.draft)) {
           registry.set(state, { ...current, draft: Draft.EMPTY_DRAFT });
         }
         return null;
       }
       const pending = {
-        request: { changes },
+        edit: (tx: Notebook.Transaction) => {
+          for (const edit of edits) edit(tx);
+        },
         draft: current.draft,
         response: null,
       };
       registry.set(state, { ...current, pending });
       return pending;
     },
-    settle(submission: Submission, response: Protocol.DocumentOutput | null) {
+    settle(submission: Submission, response: typeof Protocol.Document.Type | null) {
       const current = registry.get(state);
-      if (closed || current.pending?.request !== submission.request) return;
+      if (closed || current.pending?.edit !== submission.edit) return;
       if (response && response.notebook_id !== notebookId) {
         throw new Error("Edit response belongs to another notebook");
       }

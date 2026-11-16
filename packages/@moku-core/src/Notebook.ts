@@ -1,257 +1,212 @@
+/** Observe and edit a notebook acquired with Host.notebooks.attach. @module */
+import { Schema, type Effect } from "effect";
+import type { AsyncResult, Atom } from "effect/reactivity";
+import * as Protocol from "./Protocol.ts";
+import type { Client } from "./internal/client.ts";
+import { ModelError } from "./internal/client.ts";
+import type { Sse } from "effect/encoding";
+export { ModelError, isRejection } from "./internal/client.ts";
+
+/** A coherent document revision with its cells in display order. */
+export type Document = typeof Protocol.Document.Type & {
+  /** Cells belonging to this revision, in display order. */
+  readonly cells: readonly (typeof Protocol.Cell.Type)[];
+};
+/** The synchronized notebook and its retained activity. */
+export interface State {
+  /** Metadata and permitted operations, or null after removal. */
+  readonly notebook: typeof Protocol.Notebook.Type | null;
+  /** The latest complete source revision, or null when source is unavailable. */
+  readonly document: Document | null;
+  /** The attached runtime, or null when none exists. */
+  readonly runtime: typeof Protocol.Runtime.Type | null;
+  /** Dependency analysis for the published document, or null while unavailable. */
+  readonly analysis: typeof Protocol.Analysis.Type | null;
+  /** Retained runs indexed by ID. */
+  readonly runs: Readonly<Record<string, typeof Protocol.Run.Type>>;
+  /** Retained cell and scratch executions indexed by ID. */
+  readonly executions: Readonly<Record<string, typeof Protocol.Execution.Type>>;
+  /** Console chunks indexed by ID and associated with an execution. */
+  readonly consoles: Readonly<Record<string, typeof Protocol.Console.Type>>;
+  /** Display records indexed by ID and associated with an execution. */
+  readonly displays: Readonly<Record<string, typeof Protocol.Display.Type>>;
+  /** Variables currently reported by the runtime. */
+  readonly variables: Readonly<Record<string, typeof Protocol.Variable.Type>>;
+  /** Input requests indexed by ID, including pending replies. */
+  readonly inputs: Readonly<Record<string, typeof Protocol.Input.Type>>;
+}
+/** A cell version accepted by the host, usable in a subsequent run. */
+export interface CellVersion {
+  /** The notebook that owns this cell version. */
+  readonly notebook_id: (typeof Protocol.Notebook.Type)["id"];
+  /** The cell to execute. */
+  readonly id: typeof Protocol.CellId.Type;
+  /** The cell version the host must still hold. */
+  readonly etag: (typeof Protocol.Cell.Type)["etag"];
+}
+/** The document revision and surviving cells changed by an edit or save. */
+export interface EditResult {
+  /** The revision accepted by the command, suitable for saving. */
+  readonly document: typeof Protocol.Document.Type;
+  /** Changed cells still present after the command, suitable for running. */
+  readonly cells: readonly CellVersion[];
+}
+/** Fields to update, preserving unspecified values and configuration settings. */
+export interface CellPatch {
+  /** Replacement source; required when updating a cell whose source was withheld. */
+  readonly code?: string;
+  /** Replacement cell name. */
+  readonly name?: string;
+  /** Configuration fields to merge into the observed cell. */
+  readonly config?: Partial<typeof Protocol.CellConfig.Type>;
+}
+/** Placement of a newly created cell; omitted placement appends it. */
+export interface Placement {
+  /** Inserts before this cell; mutually exclusive with after. */
+  readonly before?: typeof Protocol.CellId.Type;
+  /** Inserts after this cell; mutually exclusive with before. */
+  readonly after?: typeof Protocol.CellId.Type;
+}
+/** Changes collected and submitted together by {@link Interface.edit}. */
+export interface Transaction {
+  /** Updates an observed cell, or a cell created earlier in this transaction. */
+  update(
+    cell: typeof Protocol.Cell.Type | typeof Protocol.CellId.Type,
+    patch: CellPatch,
+  ): void;
+  /** Creates a cell and returns its ID before submission. An omitted ID is generated. */
+  insert(
+    cell: Omit<typeof Protocol.CellInput.Type, "id"> & {
+      readonly id?: typeof Protocol.CellId.Type;
+    },
+    placement?: Placement,
+  ): typeof Protocol.CellId.Type;
+  /** Removes an observed cell, or a cell created earlier in this transaction. */
+  remove(cell: typeof Protocol.Cell.Type | typeof Protocol.CellId.Type): void;
+  /** Reorders the complete document using the observed order's precondition. */
+  reorder(
+    document: typeof Protocol.Document.Type,
+    order: readonly (typeof Protocol.CellId.Type)[],
+  ): void;
+}
+/** A synchronous edit callback. Retaining the transaction after return is invalid. */
+export type Edit = (transaction: Transaction) => void;
+type Method = Client["Notebook"][Exclude<keyof Client["Notebook"], "events">];
+/** Native transport, decoding, protocol, or local command failure. */
+export type CommandError =
+  | Effect.Error<ReturnType<Method>>
+  | ModelError
+  | typeof Protocol.Problem.Type;
+/** Failures that can prevent a notebook observation from staying synchronized. */
+export type Error = CommandError | Sse.SseError | Sse.Retry;
+/** Runtime startup choices supplied in response to a decision-required problem. */
+export type StartOptions = typeof Protocol.StartRuntimeRequest.Type;
+/** Cells to execute at their observed versions. */
+export interface RunOptions {
+  /** Cells to submit in order; the host applies its execution policy. */
+  readonly cells: readonly CellVersion[];
+}
+/** Operations on a notebook's current runtime, valid across restarts. */
+export interface Runtime {
+  /** Starts a runtime, optionally answering host startup decisions. */
+  readonly start: (
+    options?: StartOptions,
+  ) => Effect.Effect<typeof Protocol.Runtime.Type, CommandError>;
+  /** Replaces the current runtime and clears its execution state. */
+  readonly restart: () => Effect.Effect<typeof Protocol.Runtime.Type, CommandError>;
+  /** Stops the current runtime. */
+  readonly stop: () => Effect.Effect<typeof Protocol.Runtime.Type, CommandError>;
+  /** Interrupts work executing in the runtime. */
+  readonly interrupt: () => Effect.Effect<typeof Protocol.Runtime.Type, CommandError>;
+  /** Submits cells at their supplied versions and returns the accepted run. */
+  readonly run: (
+    options: RunOptions,
+  ) => Effect.Effect<typeof Protocol.Run.Type, CommandError>;
+  /** Executes scratch code without changing the document. */
+  readonly execute: (options: {
+    readonly code: string;
+  }) => Effect.Effect<typeof Protocol.Run.Type, CommandError>;
+  /** Cancels one run, including its queued work. */
+  readonly cancel: (options: {
+    readonly runId: string;
+  }) => Effect.Effect<typeof Protocol.Run.Type, CommandError>;
+  /** Answers a pending input request. */
+  readonly reply: (options: {
+    readonly inputId: string;
+    readonly value: string;
+  }) => Effect.Effect<typeof Protocol.Input.Type, CommandError>;
+}
 /**
- * Live notebook state and commands, owned by an Effect scope.
+ * A scoped notebook observation and commands.
  *
- * Use {@link make} to acquire an instance or {@link layer} to provide it as
- * {@link Service}. Views can share the same instance.
- *
- * @module
- */
-import { Context, Effect, Layer, type Scope } from "effect";
-import { Atom, AtomRegistry } from "effect/reactivity";
-import type * as Runtime from "./Runtime.ts";
-import * as Interactions from "./internal/interactions.ts";
-import type * as Protocol from "./Protocol.ts";
-import * as Transport from "./internal/transport.ts";
-import { observe, type Observation } from "./internal/observe.ts";
-import { emptyNotebook, reduceNotebook, type NotebookState } from "./notebook/state.ts";
-import type { Confirmed } from "./notebook/confirmed.ts";
-
-export type { Confirmed };
-
-/**
- * Observed notebook records, including runtime activity and execution results.
- */
-export type Snapshot = Readonly<Omit<NotebookState, "confirmed">>;
-
-/**
- * Identifies a notebook through a host connection.
- *
- * `connectionId` identifies the proxy's connection to a host. `notebookId`
- * identifies the notebook on that host.
- */
-export interface Target {
-  readonly connectionId: string;
-  readonly notebookId: string;
-}
-
-/**
- * The latest complete document revision and its current edit availability.
- */
-export interface Source {
-  /**
-   * Null until a complete document revision has arrived.
-   */
-  readonly document: Confirmed | null;
-  readonly canEdit: boolean;
-}
-/**
- * Notebook records, confirmed source, and observation progress.
- */
-export interface State extends Observation<Snapshot> {
-  readonly source: Source;
-}
-
-export interface RequestOptions {
-  /**
-   * An idempotency key for one logical request.
-   *
-   * Use a fresh ID for a new operation. Reuse it only when retrying that same
-   * request with the same payload.
-   */
-  readonly requestId: string;
-}
-
-export interface EditOptions extends RequestOptions {
-  readonly request: Protocol.EditRequest;
-}
-
-export interface SaveOptions extends RequestOptions {
-  /**
-   * The confirmed document revision to save; sent as an If-Match precondition.
-   */
-  readonly etag: string;
-
-  /**
-   * Choices supplied in response to a host decision request.
-   */
-  readonly decisions?: Record<string, string>;
-}
-
-/**
- * A notebook observation and commands bound to one host connection.
+ * After a transport or server failure, repeat the same Effect to retry its request
+ * within the host's retry window. Success or rejection ends that request, so
+ * repeating the Effect then submits new work.
  */
 export interface Interface {
-  readonly target: Target;
-
+  /** Identity of the attached notebook. */
+  readonly id: (typeof Protocol.Notebook.Type)["id"];
+  /** Synchronized state in the registry that acquired this notebook. */
+  readonly state: Atom.Atom<AsyncResult.AsyncResult<State, Error>>;
   /**
-   * Read-only records, source, connection status, and any observation error.
+   * Reuses a running runtime or starts one and waits up to 60 seconds.
+   *
+   * An uncertain startup retains its request key for retry. Once a running runtime
+   * is confirmed, a later call can start fresh work if that runtime has stopped.
    */
-  readonly state: Atom.Atom<State>;
-
+  readonly ensureRunning: Effect.Effect<
+    void,
+    Error | import("effect").Cause.TimeoutError
+  >;
   /**
-   * Submits versioned document changes to the host.
+   * Submits an atomic edit against the supplied cell versions.
+   *
+   * The callback runs for each new submission. After an uncertain failure,
+   * retrying the Effect reuses that submission within the host's retry window.
    */
-  readonly edit: (
-    options: EditOptions,
-  ) => Effect.Effect<Protocol.EditResponseOutput, Transport.RequestError>;
-
-  /**
-   * Saves the specified confirmed revision to disk.
-   */
+  readonly edit: (edit: Edit) => Effect.Effect<EditResult, CommandError>;
+  /** Saves the observed revision; decisions answer a host's decision-required problem. */
   readonly save: (
-    options: SaveOptions,
-  ) => Effect.Effect<Protocol.EditResponseOutput, Transport.RequestError>;
+    document: typeof Protocol.Document.Type,
+    options?: typeof Protocol.SaveRequest.Type,
+  ) => Effect.Effect<EditResult, CommandError>;
+  /** Commands targeting the current runtime. */
+  readonly runtime: Runtime;
+}
 
-  /**
-   * Execution commands and native output interactions for this notebook.
-   */
-  readonly runtime: Runtime.Interface;
+const indexes = new WeakMap<Document, ReadonlyMap<string, typeof Protocol.Cell.Type>>();
+
+/** Returns the cell lookup shared by readers of this immutable document revision. */
+export function cellIndex(
+  document: Document,
+): ReadonlyMap<string, typeof Protocol.Cell.Type> {
+  let cells = indexes.get(document);
+  if (!cells) {
+    cells = new Map(document.cells.map((cell) => [cell.id, cell]));
+    indexes.set(document, cells);
+  }
+  return cells;
 }
 
 /**
- * The current notebook supplied to an Effect program.
+ * Creates a cell ID that the caller has not reserved.
+ *
+ * Include deleted and pending cells in the reservation check when their identities
+ * must not be reused. Throws {@link ModelError} if 100 candidates collide.
  */
-export class Service extends Context.Service<Service, Interface>()("@moku/Notebook") {}
-
-/**
- * Acquires a notebook observation and its commands.
- *
- * Read its atoms with the AtomRegistry supplied to this Effect. Closing the
- * scope stops observation and aborts in-flight requests. Connection failures
- * are reported through `state`.
- *
- * @example Acquire a notebook through a runtime atom
- * ```ts
- * import { Atom } from "effect/reactivity";
- * import * as Model from "@moku/core";
- * import * as Notebook from "@moku/core/Notebook";
- *
- * const runtime = Atom.runtime(Model.layer(window.location.origin));
- * const openNotebook = (target: Notebook.Target) =>
- *   runtime.atom(Notebook.make(target));
- * ```
- */
-export function make(
-  input: Target,
-): Effect.Effect<
-  Interface,
-  never,
-  Transport.Service | AtomRegistry.AtomRegistry | Scope.Scope
-> {
-  return Effect.gen(function* () {
-    const transport = yield* Transport.Service;
-    const registry = yield* AtomRegistry.AtomRegistry;
-    const target = Object.freeze({ ...input });
-    const lifetime = yield* Effect.acquireRelease(
-      Effect.sync(() => new AbortController()),
-      (controller) => Effect.sync(() => controller.abort()),
-    );
-    const notebook = transport
-      .client(target.connectionId, lifetime.signal)
-      .notebook(target.notebookId);
-    const observed = observe({
-      registry,
-      signal: lifetime.signal,
-      initial: emptyNotebook(),
-      reduce: (state, event: Protocol.EventOutput) => {
-        if ("notebook" in event.data && event.data.notebook.id !== target.notebookId)
-          throw new Error("Notebook stream changed identity");
-        for (const record of Object.values(event.data)) {
-          if (
-            typeof record === "object" &&
-            record !== null &&
-            "notebook_id" in record &&
-            record.notebook_id !== target.notebookId
-          )
-            throw new Error("Notebook stream changed identity");
-        }
-        return reduceNotebook(state, event);
-      },
-      resume: (state) =>
-        state.phase === "snapshot"
-          ? emptyNotebook()
-          : { ...state, phase: "replay" as const, ready: false },
-      open: (onStatus) =>
-        notebook.events({
-          types: [
-            "notebook",
-            "document",
-            "cell",
-            "analysis",
-            "runtime",
-            "run",
-            "execution",
-            "console",
-            "display",
-            "variable",
-            "input",
-          ],
-          onStatus,
-          signal: lifetime.signal,
-        }),
-    });
-    yield* Atom.mount(observed);
-    const state = Atom.readable((get): State => {
-      const observation = get(observed);
-      const { confirmed, ...value } = observation.value;
-      return {
-        ...observation,
-        value,
-        source: {
-          document: confirmed.current,
-          canEdit:
-            observation.status === "connected" &&
-            value.phase === "live" &&
-            confirmed.current !== null &&
-            value.notebook?.operations.includes("notebook.edit") === true,
-        },
-      };
-    });
-    const interactions = yield* Interactions.make(target, state);
-    return Service.of({
-      target,
-      state,
-      edit: ({ request, requestId }) =>
-        Transport.mutation((signal) =>
-          notebook.edit(request.changes, { signal, idempotencyKey: requestId }),
-        ),
-      save: ({ etag, requestId, decisions }) =>
-        Transport.mutation((signal) =>
-          notebook.save({
-            ifMatch: etag,
-            idempotencyKey: requestId,
-            decisions,
-            signal,
-          }),
-        ),
-      runtime: {
-        ...interactions,
-        start: ({ requestId, decisions }) =>
-          Transport.mutation((signal) =>
-            notebook.start({ idempotencyKey: requestId, decisions, signal }),
-          ),
-        run: ({ request, requestId }) =>
-          Transport.mutation((signal) =>
-            notebook.run({ ...request, idempotencyKey: requestId, signal }),
-          ),
-        interrupt: ({ requestId }) =>
-          Transport.mutation((signal) =>
-            notebook.interrupt({ idempotencyKey: requestId, signal }),
-          ),
-        cancel: ({ runId, requestId }) =>
-          Transport.mutation((signal) =>
-            notebook.cancel({ runId, idempotencyKey: requestId, signal }),
-          ),
-        stop: ({ requestId }) =>
-          Transport.mutation((signal) =>
-            notebook.stop({ idempotencyKey: requestId, signal }),
-          ),
-      },
-    });
+export function createCellId(
+  reserved: (id: string) => boolean,
+): typeof Protocol.CellId.Type {
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = Array.from(
+      crypto.getRandomValues(new Uint8Array(4)),
+      (byte) => alphabet[byte % alphabet.length],
+    ).join("");
+    if (!reserved(id)) return Schema.decodeUnknownSync(Protocol.CellId)(id);
+  }
+  throw new ModelError({
+    reason: "invalid-edit",
+    message: "Could not generate a unique cell ID.",
   });
 }
-
-/**
- * Acquires a notebook and provides it as {@link Service} for the layer scope.
- */
-export const layer = (target: Target) => Layer.effect(Service, make(target));

@@ -9,30 +9,24 @@ import * as Confirmed from "./confirmed.ts";
 export interface NotebookState {
   phase: "snapshot" | "replay" | "live";
   confirmed: Confirmed.State;
-  ready: boolean;
-  notebook: Protocol.NotebookOutput | null;
-  document: Protocol.DocumentOutput | null;
-  analysis: Protocol.AnalysisOutput | null;
-  runtime: Protocol.RuntimeOutput | null;
-  cells: Record<string, Protocol.CellOutput>;
-  runs: Record<string, Protocol.RunOutput>;
-  executions: Record<string, Protocol.ExecutionOutput>;
-  consoles: Record<string, Protocol.ConsoleOutput>;
-  displays: Record<string, Protocol.DisplayOutput>;
-  variables: Record<string, Protocol.VariableOutput>;
-  inputs: Record<string, Protocol.InputOutput>;
+  notebook: typeof Protocol.Notebook.Type | null;
+  analysis: typeof Protocol.Analysis.Type | null;
+  runtime: typeof Protocol.Runtime.Type | null;
+  runs: Record<string, typeof Protocol.Run.Type>;
+  executions: Record<string, typeof Protocol.Execution.Type>;
+  consoles: Record<string, typeof Protocol.Console.Type>;
+  displays: Record<string, typeof Protocol.Display.Type>;
+  variables: Record<string, typeof Protocol.Variable.Type>;
+  inputs: Record<string, typeof Protocol.Input.Type>;
 }
 
 export function emptyNotebook(): NotebookState {
   return {
-    ready: false,
     phase: "snapshot",
     confirmed: Confirmed.initial,
     notebook: null,
-    document: null,
     analysis: null,
     runtime: null,
-    cells: {},
     runs: {},
     executions: {},
     consoles: {},
@@ -59,7 +53,7 @@ function withoutExecution<T extends { execution_id: string }>(
 
 export function reduceNotebook(
   state: NotebookState,
-  event: Protocol.EventOutput,
+  event: Protocol.NotebookEvent,
 ): NotebookState {
   if (event.event === "reset") return emptyNotebook();
   if (event.event === "notebook.removed") {
@@ -68,16 +62,10 @@ export function reduceNotebook(
       : { ...emptyNotebook(), phase: state.phase };
   }
   const confirmed = Confirmed.reduce(state.confirmed, event, state.phase);
-  if (confirmed !== state.confirmed)
-    state = {
-      ...state,
-      confirmed,
-      document: confirmed.current?.revision ?? null,
-      cells: Object.fromEntries(confirmed.current?.cells ?? []),
-    };
+  if (confirmed !== state.confirmed) state = { ...state, confirmed };
   switch (event.event) {
     case "ready":
-      return { ...state, ready: true, phase: "live" };
+      return { ...state, phase: "live" };
     case "notebook":
       return { ...state, notebook: event.data.notebook };
     case "analysis":

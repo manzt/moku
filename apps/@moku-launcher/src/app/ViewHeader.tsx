@@ -2,10 +2,10 @@ import * as React from "react";
 import * as ReactRouter from "react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
-import type * as Notebook from "@moku/core/Notebook";
-import type * as Workspace from "@moku/core/Workspace";
+import type * as Notebook from "./Notebook.ts";
+import type * as Workspace from "./Workspace.ts";
 import type { Plugin } from "@moku/plugin";
-import type { Runtime } from "./runtime.ts";
+import type * as Application from "./Application.ts";
 import { viewHref } from "./routes.ts";
 import { LauncherBar, ViewPicker, rememberView } from "./LauncherBar.tsx";
 
@@ -13,20 +13,20 @@ export function ViewHeader({
   target,
   viewKey,
   views,
-  runtime,
+  application,
   workspace,
 }: {
   target: Notebook.Target;
   viewKey: string;
   views: readonly Plugin.RegisteredView[];
-  runtime: Runtime;
-  workspace: Workspace.Workspace;
+  application: Application.Interface;
+  workspace: Workspace.Interface;
 }) {
   const navigate = ReactRouter.useNavigate();
   React.useEffect(() => rememberView(viewKey), [viewKey]);
   const { connections } = useAtomValue(workspace.state);
   const connection = connections.find((item) => item.id === target.connectionId);
-  const attachment = useAtomValue(runtime.notebook(target));
+  const attachment = useAtomValue(application.notebook(target));
 
   return (
     <LauncherBar
@@ -59,14 +59,14 @@ export function ViewHeader({
 }
 
 function NotebookName({ notebook }: { notebook: Notebook.Interface }) {
-  const { value } = useAtomValue(notebook.state);
+  const value = AsyncResult.getOrElse(useAtomValue(notebook.state), () => undefined);
   return (
     <span
       className="view-notebook"
       aria-current="page"
-      title={value.notebook?.path ?? notebook.target.notebookId}
+      title={value?.notebook?.path ?? notebook.target.notebookId}
     >
-      {value.notebook?.name ?? notebook.target.notebookId}
+      {value?.notebook?.name ?? notebook.target.notebookId}
     </span>
   );
 }

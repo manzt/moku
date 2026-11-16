@@ -9,7 +9,7 @@ import type {
   CellOutputs,
   OutputItem,
 } from "../src/index.ts";
-import type { DisplayRendererProps } from "../src/internal/session.ts";
+import type * as RendererSession from "../src/internal/RendererSession.ts";
 import type { DisplayRenderer } from "../dist/renderer.js";
 
 Vitest.test(
@@ -17,20 +17,20 @@ Vitest.test(
   () => {
     Vitest.expectTypeOf<
       React.ComponentProps<typeof DisplayView>["data"]
-    >().toEqualTypeOf<Protocol.DisplayDataOutput>();
+    >().toEqualTypeOf<typeof Protocol.DisplayData.Type>();
     Vitest.expectTypeOf<
       React.ComponentProps<typeof ConsoleOutput>["chunks"][number]
-    >().toEqualTypeOf<Protocol.ConsoleOutput>();
+    >().toEqualTypeOf<typeof Protocol.Console.Type>();
     Vitest.expectTypeOf<
       React.ComponentProps<typeof CellOutputs>["outcome"]
-    >().toEqualTypeOf<Protocol.OutcomeOutput | null>();
+    >().toEqualTypeOf<typeof Protocol.Outcome.Type | null>();
     Vitest.expectTypeOf<
       React.ComponentProps<typeof DisplayRenderer>
-    >().toEqualTypeOf<DisplayRendererProps>();
+    >().toEqualTypeOf<RendererSession.DisplayProps>();
     Vitest.expectTypeOf<OutputItem>().toEqualTypeOf<Outputs.Item>();
     Vitest.expectTypeOf<
       Extract<OutputItem, { kind: "display" }>["content"]
-    >().toEqualTypeOf<Protocol.DisplayDataOutput>();
+    >().toEqualTypeOf<typeof Protocol.DisplayData.Type>();
   },
 );
 
