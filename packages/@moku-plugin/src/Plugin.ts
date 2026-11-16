@@ -1,36 +1,37 @@
 /**
- * Scoped registrations for notebook views.
+ * Define notebook views for an application.
  *
- * The host selects a notebook and supplies it to each view. Views of the same
- * notebook can share its observation and commands.
+ * The application selects a notebook and renders each view in its atom registry.
+ * Plugin resources live in the scope passed to {@link load}.
  *
  * @module
  */
+import type { AtomRegistry } from "effect/reactivity";
 import type { Effect, Scope } from "effect";
 import type * as React from "react";
 import type * as Notebook from "@moku/core/Notebook";
 
 /**
- * The notebook selected by the host for this view instance.
+ * Inputs supplied when the application renders a view.
  */
 export interface ViewProps {
+  /** The notebook selected for this view instance. */
   readonly notebook: Notebook.Interface;
 }
 
-/**
- * A named notebook view that the host can open.
- */
+/** A notebook view that the application can select and render. */
 export interface View {
+  /** Stable identity within the plugin. */
   readonly id: string;
+  /** Label displayed in the application's view picker. */
   readonly title: string;
-
-  /**
-   * Renders the view for the supplied notebook; it may occupy a whole page.
-   */
+  /** Renders the selected notebook in the application's atom registry. */
   readonly render: (props: ViewProps) => React.ReactNode;
 }
 
+/** Capabilities available during plugin setup. */
 export interface Context {
+  /** Registers notebook views in the plugin's scope. */
   readonly view: {
     /**
      * Registers a view until the current Effect scope closes.
@@ -40,18 +41,22 @@ export interface Context {
 }
 
 /**
- * A plugin identifier and its scoped setup Effect.
+ * A plugin whose setup acquires views and other scoped resources.
  */
-export interface Plugin {
+export interface Interface<R = never> {
+  /** Stable identity across all plugins in one load. */
   readonly id: string;
-  readonly effect: (context: Context) => Effect.Effect<void, unknown, Scope.Scope>;
+  /** Acquires registrations and resources released with this plugin. */
+  readonly effect: (
+    context: Context,
+  ) => Effect.Effect<void, unknown, R | Scope.Scope | AtomRegistry.AtomRegistry>;
 }
 
 /**
- * Defines a plugin while preserving its inferred type.
+ * Defines a plugin while preserving the services its setup requires.
  *
- * Setup runs when the host loads the plugin. Register views with `ctx.view.add`;
- * acquire other resources in the same scope so they are released on unload.
+ * {@link load} runs setup in a child scope. Register views with `ctx.view.add`
+ * and acquire other resources in that scope so they are released together.
  *
  * @example Register a notebook view
  * ```tsx
@@ -68,4 +73,12 @@ export interface Plugin {
  * });
  * ```
  */
-export const define = <P extends Plugin>(plugin: P): P => plugin;
+export const define = <P extends Interface<unknown>>(plugin: P): P => plugin;
+
+export { load } from "./internal/load.ts";
+export type {
+  Interface as Loaded,
+  State,
+  RegisteredView,
+  Failure,
+} from "./internal/load.ts";

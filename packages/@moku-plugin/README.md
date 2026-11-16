@@ -1,24 +1,40 @@
 # @moku/plugin
 
-Notebook views that a host can register, open, and unload together.
+Define notebook views with scoped setup and cleanup.
 
 ```tsx
-import { Plugin, type ViewProps } from "@moku/plugin";
+import * as React from "react";
+import { Plugin } from "@moku/plugin";
 
-function Identity({ notebook }: ViewProps) {
-  return <p>{notebook.target.notebookId}</p>;
-}
+const Inspector = React.lazy(() => import("./Inspector"));
 
 export default Plugin.define({
-  id: "example",
+  id: "inspector",
   effect: (ctx) =>
     ctx.view.add({
-      id: "identity",
-      title: "Notebook identity",
-      render: (props) => <Identity {...props} />,
+      id: "overview",
+      title: "Overview",
+      render: ({ notebook }) => <Inspector notebook={notebook} />,
     }),
 });
 ```
 
-The host supplies the selected notebook through `ViewProps`.
-Registrations and other scoped resources are released when the plugin unloads.
+Load plugins in an Effect scope with an atom registry.
+
+```ts
+import { Layer } from "effect";
+import { Atom } from "effect/reactivity";
+import { Plugin } from "@moku/plugin";
+import inspector from "./inspector";
+
+const runtime = Atom.runtime(Layer.empty);
+const plugins = runtime.atom(Plugin.load([inspector]));
+```
+
+The loaded state lists views by their plugin and view IDs. Each view has a title
+and a render function that receives the selected notebook. A plugin can register
+several views. Closing its scope releases its registrations and resources.
+Failed setup is cleaned up without preventing other plugins from loading.
+
+Render a view in the notebook's atom registry, with React Suspense and an error
+boundary. Interactive outputs also need the `@moku/outputs` provider.

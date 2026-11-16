@@ -1,13 +1,15 @@
 import type * as React from "react";
 import * as ReactRouter from "react-router";
-import type { RegisteredView } from "./Host.ts";
+import type { Plugin } from "@moku/plugin";
+
+import { canonicalViewKey } from "./routes.ts";
 
 export const HOST_VIEW = "host";
 const preferenceKey = "moku:open-with";
 
 export function preferredView() {
   try {
-    return localStorage.getItem(preferenceKey) ?? HOST_VIEW;
+    return canonicalViewKey(localStorage.getItem(preferenceKey) ?? HOST_VIEW);
   } catch {
     return HOST_VIEW;
   }
@@ -48,7 +50,7 @@ export function ViewPicker({
   includeHost = true,
 }: {
   value: string;
-  views: readonly RegisteredView[];
+  views: readonly Plugin.RegisteredView[];
   onChange: (value: string) => void;
   includeHost?: boolean;
 }) {

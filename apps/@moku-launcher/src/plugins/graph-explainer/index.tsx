@@ -5,5 +5,9 @@ import "./style.css";
 export default Plugin.define({
   id: "graph-explainer",
   effect: (ctx) =>
-    ctx.view.add({ id: "graph", title: "Graph explainer", render: GraphExplainer }),
+    ctx.view.add({
+      id: "graph",
+      title: "Graph explainer",
+      render: GraphExplainer,
+    }),
 });

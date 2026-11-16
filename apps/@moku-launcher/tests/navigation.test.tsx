@@ -96,7 +96,11 @@ async function mount(route: Route) {
               title: "Identity",
               render: Identity,
             });
-            yield* ctx.view.add({ id: "other", title: "Other", render: Identity });
+            yield* ctx.view.add({
+              id: "other",
+              title: "Other",
+              render: Identity,
+            });
           }),
       }),
     ],
@@ -286,7 +290,7 @@ Vitest.test(
   "view URLs preserve identifiers and malformed routes stay unavailable",
   () => {
     const target = { connectionId: "host +/&", notebookId: "notebook/%?雪" };
-    const viewKey = "plugin%2Fone/view";
+    const viewKey = "plugin%2Fone/view%2Fone";
     Vitest.expect(
       parseRoute(new URL(viewHref(target, viewKey), "http://moku.test")),
     ).toEqual({
@@ -311,7 +315,9 @@ Vitest.test("existing notebook links resolve to the renamed plugins", () => {
   const target = { connectionId: "host", notebookId: "notebook" };
   for (const [previous, current] of [
     ["dag/graph", "graph-explainer/graph"],
+    ["graph-explainer/graph", "graph-explainer/graph"],
     ["editor/notebook", "notebook/notebook"],
+    ["notebook/notebook", "notebook/notebook"],
   ]) {
     Vitest.expect(
       parseRoute(new URL(viewHref(target, previous), "http://moku.test")),
@@ -322,3 +328,24 @@ Vitest.test("existing notebook links resolve to the renamed plugins", () => {
     });
   }
 });
+
+Vitest.test(
+  "saved views and direct links retain their registered identity",
+  async () => {
+    localStorage.setItem("moku:open-with", "test/identity");
+    const catalog = await mount({ kind: "catalog" });
+    await vi.waitFor(() =>
+      Vitest.expect(catalog.element.querySelector("select")?.value).toBe(
+        "test/identity",
+      ),
+    );
+    const view = await mount(
+      parseRoute(
+        new URL("/notebook/n?host=a&view=test%2Fidentity", "http://moku.test"),
+      ),
+    );
+    await vi.waitFor(() =>
+      Vitest.expect(view.element.querySelector("h1")?.textContent).toBe("a:n"),
+    );
+  },
+);
