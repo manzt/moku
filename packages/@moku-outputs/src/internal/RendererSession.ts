@@ -6,10 +6,11 @@
  *
  * @module
  */
-import type * as Interaction from "@moku/core/Interaction";
+import type { Schema } from "effect";
+import type * as CommProtocol from "@moku/core/internal/comm-protocol";
 import type { DisplayViewProps } from "../types.ts";
 
-/** Runtime-bound callbacks installed into the native renderer's registries. */
+/** Runtime-bound callbacks installed into the marimo renderer's registries. */
 export interface Options {
   /** The runtime whose outputs may use this session. */
   readonly runtimeId: string;
@@ -17,31 +18,31 @@ export interface Options {
   readonly assetUrl: (path: string) => string;
   /** Submits paired UI element IDs and values, resolving on host acceptance. */
   readonly sendComponentValues: (
-    request: typeof Interaction.ComponentValues.Type,
+    request: typeof CommProtocol.ComponentValues.Type,
   ) => Promise<void>;
-  /** Resolves with the function's result after its reply arrives on the native stream. */
+  /** Resolves with the function's result after its reply arrives on the runtime event stream. */
   readonly invoke: (
-    request: Omit<Interaction.Invoke, "runtimeId">,
-  ) => Promise<Interaction.Json>;
+    request: typeof CommProtocol.FunctionCall.Type,
+  ) => Promise<typeof Schema.Json.Type>;
   /** Submits a widget state patch or custom message with its binary attachments. */
   readonly sendModelValue: (
-    request: typeof Interaction.ModelValue.Type,
+    request: typeof CommProtocol.ModelValue.Type,
   ) => Promise<void>;
 }
 
-/** Native renderer registrations owned by one runtime and released together. */
+/** Renderer registrations owned by one runtime and released together. */
 export interface Interface {
   /** The runtime whose widget IDs and callbacks belong to this session. */
   readonly runtimeId: string;
   /** Resolves asset references for outputs belonging to this session. */
   readonly assetUrl: (path: string) => string;
   /** Applies a notification to the renderer's UI and widget registries. */
-  readonly handle: (notification: Interaction.Notification) => Promise<void>;
+  readonly handle: (notification: CommProtocol.Notification) => Promise<void>;
   /** Releases registries and listeners; repeated calls are harmless. */
   readonly dispose: () => void;
 }
 
-/** Output content with the native session and permissions available to its widgets. */
+/** Output content with the renderer session and permissions available to its widgets. */
 export interface DisplayProps extends DisplayViewProps {
   /** Missing or mismatched sessions leave runtime-bound outputs disconnected. */
   readonly session?: Interface | null;

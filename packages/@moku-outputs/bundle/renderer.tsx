@@ -1,5 +1,5 @@
 /**
- * The embedded marimo renderer and its native interaction adapter.
+ * The embedded marimo renderer and its runtime callbacks.
  *
  * @module
  */
@@ -135,18 +135,11 @@ export function createSession(
         requireActive();
         await options.sendModelValue(request);
       },
-      sendFunctionRequest: async (request: {
-        functionCallId: string;
-        namespace: string;
-        functionName: string;
-        args: Record<string, unknown>;
-      }) => {
+      sendFunctionRequest: async (
+        request: Parameters<RendererSession.Options["invoke"]>[0],
+      ) => {
         requireActive();
-        const value = await options.invoke({
-          namespace: request.namespace,
-          name: request.functionName,
-          args: request.args,
-        });
+        const value = await options.invoke(request);
         if (!active) return;
         FUNCTIONS_REGISTRY.resolve(request.functionCallId, {
           function_call_id: request.functionCallId,

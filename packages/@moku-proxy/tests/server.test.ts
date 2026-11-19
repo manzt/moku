@@ -3,7 +3,7 @@ import * as Vitest from "vite-plus/test";
 import * as NodeHttp from "node:http";
 import { createApi } from "../src/server.ts";
 import type { HostRecordOutput } from "@marimo-team/client/protocol";
-import { Effect, Schema } from "effect";
+import { Effect, Schema, Stream } from "effect";
 import { AtomRegistry } from "effect/reactivity";
 import { FetchHttpClient } from "effect/http";
 import * as Host from "@moku/core/Host";
@@ -231,13 +231,26 @@ Vitest.test(
       project_id: "p",
       name: "demo.py",
       path: "demo.py",
-      operations: [],
+      operations: ["runtime.experimental.comm"],
       updated_at: null,
     };
+    const runtime = Schema.decodeUnknownSync(Protocol.Runtime)({
+      id: "rt",
+      notebook_id: "n",
+      status: "running",
+      message: null,
+      started_at: "2026-11-12T12:00:00Z",
+      marimo_version: null,
+    });
+    const model = {
+      model: "image",
+      message: { method: "custom", content: { scale: 2 } },
+      buffers: ["AQI="],
+    } as const;
     const requests: {
       method: string | undefined;
       url: string | undefined;
-      body: string;
+      body: unknown;
     }[] = [];
     const upstreamProblem = {
       type: "urn:marimo:problem:conflict",
@@ -250,20 +263,30 @@ Vitest.test(
       Vitest.expect(req.headers.cookie).toBeUndefined();
       if (req.method === "GET") {
         res.writeHead(200, { "Content-Type": "text/event-stream" });
+        if (req.url?.endsWith("/notebooks/n/events")) {
+          res.write(`event: notebook\ndata: ${JSON.stringify({ notebook })}\n\n`);
+          res.write(`event: runtime\ndata: ${JSON.stringify({ runtime })}\n\n`);
+        }
         res.write("event: ready\nid: cursor-1\ndata: {}\n\n");
         return;
       }
       void (async () => {
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        const body = Buffer.concat(chunks).toString();
         requests.push({
           method: req.method,
           url: req.url,
-          body: Buffer.concat(chunks).toString(),
+          body: body ? JSON.parse(body) : null,
         });
         Vitest.expect(req.headers["idempotency-key"]).toEqual(
           Vitest.expect.any(String),
         );
+        if (req.url?.endsWith("/runtime/experimental/comm")) {
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(runtime));
+          return;
+        }
         if (req.url?.includes("/runtime/")) {
           res.writeHead(409, { "Content-Type": "application/problem+json" });
           res.end(JSON.stringify(upstreamProblem));
@@ -278,7 +301,7 @@ Vitest.test(
             JSON.stringify(
               req.url?.endsWith("/open")
                 ? {
-                    url: "http://host.test/?file=demo.py&access_token=native-secret#cell-a",
+                    url: "http://host.test/?file=demo.py&access_token=marimo-secret#cell-a",
                   }
                 : notebook,
             ),
@@ -311,7 +334,6 @@ Vitest.test(
           Vitest.expect(yield* host.notebooks.open("n")).toEqual({
             url: "http://host.test/?file=demo.py#cell-a",
           });
-          yield* host.notebooks.delete("n");
           const attached = yield* host.notebooks.attach("n");
           for (const operation of [
             attached.runtime.restart().pipe(Effect.asVoid),
@@ -326,6 +348,32 @@ Vitest.test(
               ...upstreamProblem,
             });
           }
+          const registry = yield* AtomRegistry.AtomRegistry;
+          yield* AtomRegistry.toStream(
+            registry,
+            attached.runtime.experimentalComm.connection,
+          ).pipe(
+            Stream.filter((connection) => connection._tag === "Connected"),
+            Stream.runHead,
+            Effect.timeout("2 seconds"),
+          );
+          const invalid = yield* Effect.promise(() =>
+            fetch(f.base + "/notebooks/n/runtime/experimental/comm", {
+              method: "POST",
+              headers: f.headers,
+              body: JSON.stringify({ _tag: "Model", ...model, buffers: [123] }),
+            }),
+          );
+          Vitest.expect(invalid.status).toBe(400);
+          yield* attached.runtime.experimentalComm.send(
+            {
+              _tag: "Model",
+              ...model,
+              runtimeId: "rt",
+            },
+            crypto.randomUUID(),
+          );
+          yield* host.notebooks.delete("n");
           authenticated = false;
           const error = yield* Effect.flip(host.notebooks.open("n"));
           Vitest.expect(error).toMatchObject({
@@ -343,26 +391,31 @@ Vitest.test(
       {
         method: "POST",
         url: "/api/marimo/v1/notebooks",
-        body: JSON.stringify({ project_id: "p", name: "demo.py" }),
+        body: { project_id: "p", name: "demo.py" },
       },
       {
         method: "PATCH",
         url: "/api/marimo/v1/notebooks/n",
-        body: JSON.stringify({ name: "renamed.py" }),
+        body: { name: "renamed.py" },
       },
-      { method: "POST", url: "/api/marimo/v1/notebooks/n/open", body: "" },
-      { method: "DELETE", url: "/api/marimo/v1/notebooks/n", body: "" },
-      { method: "POST", url: "/api/marimo/v1/notebooks/n/runtime/restart", body: "" },
+      { method: "POST", url: "/api/marimo/v1/notebooks/n/open", body: null },
+      { method: "POST", url: "/api/marimo/v1/notebooks/n/runtime/restart", body: null },
       {
         method: "POST",
         url: "/api/marimo/v1/notebooks/n/runtime/execute",
-        body: JSON.stringify({ code: "print(42)" }),
+        body: { code: "print(42)" },
       },
       {
         method: "POST",
         url: "/api/marimo/v1/notebooks/n/runtime/inputs/input-1/reply",
-        body: JSON.stringify({ value: "answer" }),
+        body: { value: "answer" },
       },
+      {
+        method: "POST",
+        url: "/api/marimo/v1/notebooks/n/runtime/experimental/comm",
+        body: { _tag: "Model", ...model },
+      },
+      { method: "DELETE", url: "/api/marimo/v1/notebooks/n", body: null },
     ]);
   },
 );
@@ -506,6 +559,16 @@ Vitest.test(
       (await post("/edits", "{}", { Cookie: headers.Cookie, Origin: origin })).status,
       400,
     );
+    NodeAssert.equal(
+      (
+        await post(
+          "/runtime/experimental/comm",
+          JSON.stringify({ _tag: "SetValues", values: { slider: 1 } }),
+          { Cookie: headers.Cookie, Origin: origin },
+        )
+      ).status,
+      400,
+    );
     for (const [path, body] of [
       ["/edits", "{}"],
       ["/edits", "{"],
@@ -563,7 +626,7 @@ for (const shutdown of ["browser disconnect", "proxy shutdown"] as const) {
 }
 
 Vitest.test(
-  "native outputs keep credentials server-side and force an attach-only stream",
+  "marimo output routes keep credentials server-side and force an attach-only stream",
   async ({ onTestFinished }) => {
     const calls: {
       url: string;
@@ -595,20 +658,23 @@ Vitest.test(
         }
       })();
     });
-    const native = base + "/marimo";
+    const marimoUrl = base + "/marimo";
     const post = (path: string, body: unknown, supplied: HeadersInit = headers) =>
-      fetch(native + path, {
+      fetch(marimoUrl + path, {
         method: "POST",
         headers: supplied,
         body: JSON.stringify(body),
       });
-    NodeAssert.equal((await fetch(native + "/@file/code.js", { headers })).status, 401);
-    const authorized = await post("/auth", { token: "native-secret" });
+    NodeAssert.equal(
+      (await fetch(marimoUrl + "/@file/code.js", { headers })).status,
+      401,
+    );
+    const authorized = await post("/auth", { token: "marimo-secret" });
     NodeAssert.deepEqual(await authorized.json(), { success: true });
-    NodeAssert.equal(calls[0].headers.authorization, "Bearer native-secret");
+    NodeAssert.equal(calls[0].headers.authorization, "Bearer marimo-secret");
     NodeAssert.equal(calls[0].headers.cookie, undefined);
     const stream = await fetch(
-      native +
+      marimoUrl +
         "/sse?session_id=output-1&file=%2Fproject%2Fn.py&kiosk=false&types=cell&target=https://example.com",
       { headers },
     );
@@ -616,9 +682,9 @@ Vitest.test(
     const url = new URL(calls[1].url, "http://upstream");
     NodeAssert.equal(url.pathname, "/sse");
     NodeAssert.equal(url.searchParams.get("kiosk"), "true");
-    NodeAssert.equal(url.searchParams.get("types"), "notebook,runtime,marimo");
+    NodeAssert.equal(url.searchParams.has("types"), false);
     NodeAssert.equal(url.searchParams.get("target"), null);
-    NodeAssert.equal(calls[1].headers.authorization, "Bearer native-secret");
+    NodeAssert.equal(calls[1].headers.authorization, "Bearer marimo-secret");
     NodeAssert.equal(calls[1].headers["last-event-id"], undefined);
     const body = {
       modelId: "model",
@@ -637,8 +703,15 @@ Vitest.test(
     NodeAssert.deepEqual(JSON.parse(calls[2].body), body);
     NodeAssert.equal(calls[2].headers["marimo-server-token"], "server-secret");
     NodeAssert.equal(calls[2].headers["marimo-session-id"], "output-1");
-    NodeAssert.equal(calls[2].headers["idempotency-key"], undefined);
-    const asset = await fetch(native + "/@file/code.js", { headers });
+    NodeAssert.equal(calls[2].headers["idempotency-key"], "request-1");
+    const missingKey = await post("/api/kernel/set_model_value", body, {
+      Cookie: headers.Cookie,
+      Origin: headers.Origin,
+      "Marimo-Session-Id": "output-1",
+    });
+    NodeAssert.equal(missingKey.status, 400);
+    NodeAssert.equal(calls.length, 3);
+    const asset = await fetch(marimoUrl + "/@file/code.js", { headers });
     NodeAssert.equal(await asset.text(), "export default {};");
     NodeAssert.equal(asset.headers.get("content-type"), "text/javascript");
     NodeAssert.equal((await post("/api/kernel/set_model_value", body)).status, 400);
@@ -659,7 +732,7 @@ Vitest.test(
 );
 
 Vitest.test(
-  "closing the proxy releases native output streams",
+  "closing the proxy releases marimo output streams",
   async ({ onTestFinished }) => {
     const disconnected = Promise.withResolvers<void>();
     const { api, base, headers } = await fixture(onTestFinished, (req, res) => {
@@ -697,7 +770,7 @@ Vitest.test(
       forwarded = req.headers;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
-        JSON.stringify({ url: "http://localhost:2718/?access_token=native-secret" }),
+        JSON.stringify({ url: "http://localhost:2718/?access_token=marimo-secret" }),
       );
     });
     const response = await fetch(`${base}/notebooks/n/open`, {

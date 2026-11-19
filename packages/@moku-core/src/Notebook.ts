@@ -1,6 +1,7 @@
 /** Observe and edit a notebook acquired with Host.notebooks.attach. @module */
 import { Schema, type Effect } from "effect";
 import type { AsyncResult, Atom } from "effect/reactivity";
+import type * as Comm from "./experimental/Comm.ts";
 import * as Protocol from "./Protocol.ts";
 import type { Client } from "./internal/client.ts";
 import { ModelError } from "./internal/client.ts";
@@ -92,7 +93,7 @@ export interface Transaction {
 /** A synchronous edit callback. Retaining the transaction after return is invalid. */
 export type Edit = (transaction: Transaction) => void;
 type Method = Client["Notebook"][Exclude<keyof Client["Notebook"], "events">];
-/** Native transport, decoding, protocol, or local command failure. */
+/** Transport, decoding, protocol, or local command failure. */
 export type CommandError =
   | Effect.Error<ReturnType<Method>>
   | ModelError
@@ -108,6 +109,12 @@ export interface RunOptions {
 }
 /** Operations on a notebook's current runtime, valid across restarts. */
 export interface Runtime {
+  /**
+   * Supplies widget state and callbacks to the output renderer.
+   *
+   * @internal
+   */
+  readonly experimentalComm: Comm.Interface;
   /** Starts a runtime, optionally answering host startup decisions. */
   readonly start: (
     options?: StartOptions,

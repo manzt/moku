@@ -1,6 +1,8 @@
+// @vitest-environment happy-dom
+import * as Http from "./http.ts";
 import * as Vitest from "vite-plus/test";
 import { vi } from "vite-plus/test";
-import { AsyncResult, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Application from "../src/app/Application.ts";
 
 Vitest.test(
@@ -44,12 +46,12 @@ Vitest.test(
         { headers: { "Content-Type": "text/event-stream" } },
       );
     };
-    const registry = AtomRegistry.make();
+    const registry = AtomRegistry.make({
+      initialValues: [Atom.initialValue(Application.runtime.layer, Http.layer(fetch))],
+    });
     Vitest.onTestFinished(() => registry.dispose());
     const application = Application.make({
-      baseUrl: "http://moku.test",
       plugins: [],
-      fetch,
     });
     const target = { connectionId: "host-a", notebookId: "n" };
     const first = application.notebook(target);

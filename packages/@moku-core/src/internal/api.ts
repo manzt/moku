@@ -1,9 +1,11 @@
-/** Native protocol endpoints with forward-compatible event decoding. @module */
+/** Host protocol endpoints with forward-compatible event decoding. @module */
 import { Schema, SchemaGetter } from "effect";
 import { HttpApi } from "effect/http-api";
 import * as Host from "@marimo-team/host-protocol/Host";
 import * as Notebook from "@marimo-team/host-protocol/Notebook";
 import * as Analysis from "@marimo-team/host-protocol/experimental/Analysis";
+
+import { CommGroup } from "./comm-protocol.ts";
 
 const known = new Set<string>([
   "ready",
@@ -36,7 +38,19 @@ const UnknownEvent = Schema.Struct({
 );
 
 export const CatalogEvent = Schema.Union([Host.Event, UnknownEvent]);
-export const NotebookEvent = Schema.Union([Analysis.NotebookEvent, UnknownEvent]);
+const MarimoEvent = Schema.Struct({
+  event: Schema.Literal("marimo"),
+  id: Schema.optionalKey(Schema.String),
+  data: Schema.Struct({
+    marimo: Schema.Unknown,
+    request_id: Schema.optionalKey(Schema.String),
+  }),
+});
+export const NotebookEvent = Schema.Union([
+  Analysis.NotebookEvent,
+  MarimoEvent,
+  UnknownEvent,
+]);
 export const Api = HttpApi.make("Moku")
-  .add(Host.group(CatalogEvent), Notebook.group(NotebookEvent))
+  .add(Host.group(CatalogEvent), Notebook.group(NotebookEvent), CommGroup)
   .middleware(Host.HostToken);

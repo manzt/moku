@@ -1,18 +1,20 @@
-/** Acquire notebook state and commands from a native host-protocol client. @module */
-import { Effect, Queue, Schema, type Duration } from "effect";
+/** Acquire notebook state and commands from a host protocol client. @module */
+import { Effect, Queue, Schema, Stream, type Duration } from "effect";
 import { AsyncResult, AtomRegistry } from "effect/reactivity";
 import * as Protocol from "../Protocol.ts";
 import type * as Notebook from "../Notebook.ts";
 import { makeCommands, ModelError, type Client } from "../internal/client.ts";
 import { observe } from "../internal/observe.ts";
 import { emptyNotebook, reduceNotebook } from "./state.ts";
+import * as Comm from "../experimental/Comm.ts";
 import * as Edit from "./edit.ts";
-import type { NotebookEvent } from "../internal/api.ts";
+import * as Events from "./events.ts";
 
 export const make = Effect.fnUntraced(function* (
   client: Client,
   notebookId: string,
   retryWindow?: Duration.Input,
+  marimo?: Events.Options,
 ) {
   const id = yield* Schema.decodeUnknownEffect(Protocol.NotebookId)(notebookId);
   const params = { notebookId: id };
@@ -21,10 +23,19 @@ export const make = Effect.fnUntraced(function* (
   const reserved = new Set<string>();
   let previous: ReturnType<typeof emptyNotebook>["confirmed"]["current"] = null;
   let document: Notebook.Document | null = null;
+  const updates = yield* Queue.unbounded<Events.Update>();
   const observation = yield* observe({
-    initial: emptyNotebook,
-    reduce: (state, event: typeof NotebookEvent.Type) => {
+    initial: () => {
+      const state = emptyNotebook();
+      Queue.offerUnsafe(updates, { state });
+      return state;
+    },
+    reduce: (state, event: Events.Event) => {
       if ("_tag" in event) return state;
+      if (event.event === "marimo") {
+        Queue.offerUnsafe(updates, { state, event });
+        return state;
+      }
       if (event.event === "notebook" && event.data.notebook.id !== id)
         throw new Error("Notebook identity changed.");
       for (const record of Object.values(event.data)) {
@@ -37,7 +48,9 @@ export const make = Effect.fnUntraced(function* (
           throw new Error("Record belongs to another notebook.");
       }
       if (event.event === "cell") reserved.add(event.data.cell.id);
-      return reduceNotebook(state, event);
+      const next = reduceNotebook(state, event);
+      Queue.offerUnsafe(updates, { state: next, event });
+      return next;
     },
     resume: (state) => ({ ...state, phase: "replay" as const }),
     value: (state): Notebook.State => {
@@ -75,6 +88,14 @@ export const make = Effect.fnUntraced(function* (
   });
   const { state } = observation;
   const runtime: Notebook.Runtime = {
+    experimentalComm: yield* Comm.make({
+      id,
+      state,
+      reconnect: observation.reconnect,
+      events: Stream.fromQueue(updates),
+      client: client.Comm,
+      viewer: marimo && (yield* Events.session(marimo, observation.withSnapshot)),
+    }),
     start: (payload = {}) =>
       commands.mutation((idempotencyKey) =>
         client.Notebook.start({

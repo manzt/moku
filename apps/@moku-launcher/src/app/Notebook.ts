@@ -1,10 +1,7 @@
-/** Compose a notebook model with launcher identity and native outputs. @module */
+/** Compose a notebook model with launcher identity and output assets. @module */
 import { Effect } from "effect";
 import type * as Model from "@moku/core/Notebook";
 import type * as Host from "@moku/core/Host";
-import type * as Interaction from "@moku/core/Interaction";
-import type * as Proxy from "./Proxy.ts";
-import * as NativeOutputs from "./native/interactions.ts";
 
 /** A notebook selected through a launcher host connection. */
 export interface Target {
@@ -15,31 +12,28 @@ export interface Target {
 /** The complete notebook supplied to launcher views. */
 export interface Interface extends Model.Interface {
   readonly target: Target;
-  readonly runtime: Model.Interface["runtime"] & Interaction.Interface;
+  /** Resolves output assets for the renderer. */
+  readonly assetUrl: (path: string) => string;
 }
 
-/** Acquire the model and output connection in the same scope. */
+/** Attach a notebook and resolve its output assets through the launcher proxy. */
 export const make = Effect.fnUntraced(function* (
-  proxy: Proxy.Interface,
   host: Host.Interface,
   input: Target,
+  baseUrl: URL,
 ) {
   const target = Object.freeze({ ...input });
   const notebook = yield* host.notebooks.attach(target.notebookId);
-  const outputs = yield* NativeOutputs.make(
-    {
-      host,
-      notebookId: target.notebookId,
-      baseUrl: proxy.url(
-        `/api/hosts/${encodeURIComponent(target.connectionId)}/marimo`,
-      ),
-      fetch: proxy.fetch,
-    },
-    notebook.state,
-  );
   return {
     ...notebook,
     target,
-    runtime: { ...notebook.runtime, ...outputs },
+    assetUrl: (path: string) => {
+      if (!/^(\.\/|\/)@file\//.test(path))
+        throw new Error("Expected a marimo @file asset path.");
+      const url = new URL(baseUrl.pathname + path.replace(/^\./, ""), baseUrl);
+      if (!url.pathname.startsWith(baseUrl.pathname + "/@file/"))
+        throw new Error("Invalid asset path.");
+      return url.href;
+    },
   } satisfies Interface;
 });

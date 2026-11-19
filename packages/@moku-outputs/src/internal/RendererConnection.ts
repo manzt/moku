@@ -1,17 +1,18 @@
 /**
- * Connect native interaction events to shared renderer sessions.
+ * Connect runtime events to shared renderer sessions.
  *
  * Consumers share one connection. Runtime changes replace its session, and the
  * last consumer's release stops observation and disposes the session.
  *
  * @module
  */
-import { Effect, Stream } from "effect";
-import type * as Interaction from "@moku/core/Interaction";
+import type * as Notebook from "@moku/core/Notebook";
+import { Cause, Clock, Effect, Exit, Semaphore, Stream } from "effect";
 import type * as RendererSession from "./RendererSession.ts";
+import { WidgetUpdates } from "./WidgetUpdates.ts";
 import { loadRenderer } from "./renderer.ts";
 
-/** Renderer availability after applying native output notifications. */
+/** Renderer availability after applying output notifications. */
 export interface State {
   /** Null before kernel initialization, after a reset, or after release. */
   readonly session: RendererSession.Interface | null;
@@ -19,7 +20,7 @@ export interface State {
   readonly error: Error | null;
 }
 interface Entry {
-  readonly interactions: Interaction.Interface;
+  readonly comm: Notebook.Runtime["experimentalComm"];
   readonly controller: AbortController;
   readonly listeners: Set<(state: State) => void>;
   state: State;
@@ -34,21 +35,37 @@ let active: Entry | undefined;
  * the page-wide registries while this one still has readers.
  */
 export function acquire(
-  interactions: Interaction.Interface,
+  comm: Notebook.Runtime["experimentalComm"],
+  assetUrl: (path: string) => string,
   listener: (state: State) => void,
 ): () => void {
-  if (active && active.interactions !== interactions)
+  if (active && active.comm !== comm)
     throw new Error("Interactive outputs currently support one notebook per page.");
   let entry = active;
   if (!entry) {
     entry = {
-      interactions,
+      comm,
       controller: new AbortController(),
       listeners: new Set(),
       state: { session: null, error: null },
     };
     active = entry;
-    void start(entry);
+    const owner = entry;
+    Effect.runFork(
+      start(owner, assetUrl).pipe(
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            if (owner.controller.signal.aborted) return;
+            owner.state.session?.dispose();
+            publish(owner, {
+              session: null,
+              error: Exit.isFailure(exit) ? new Error(Cause.pretty(exit.cause)) : null,
+            });
+          }),
+        ),
+      ),
+      { signal: owner.controller.signal },
+    );
   }
   const current = entry;
   current.listeners.add(listener);
@@ -68,82 +85,117 @@ function publish(entry: Entry, state: State) {
   for (const listener of entry.listeners) listener(state);
 }
 
-async function start(entry: Entry) {
-  const { interactions, controller } = entry;
-  const signal = controller.signal;
-  function run<A, E>(effect: Effect.Effect<A, E>): Promise<A> {
-    if (signal.aborted)
-      return Promise.reject(new Error("The output session has ended."));
-    return Effect.runPromise(effect, { signal });
-  }
-  try {
-    const renderer = await loadRenderer();
-    if (signal.aborted) return;
-    await Effect.runPromise(
-      interactions.events.pipe(
-        Stream.runForEach((event) =>
-          Effect.tryPromise({
-            try: async () => {
-              if (signal.aborted) return;
-              if (event.kind === "reset") {
-                entry.state.session?.dispose();
-                publish(entry, { session: null, error: null });
-                return;
-              }
-              if (event.notification.op === "kernel-ready") {
-                entry.state.session?.dispose();
-                const runtimeId = event.runtimeId;
-                const session = renderer.createSession({
-                  runtimeId,
-                  assetUrl: interactions.assetUrl,
-                  sendComponentValues: (request) =>
-                    run(
-                      interactions.setUIValues({
-                        runtimeId,
-                        values: Object.fromEntries(
-                          request.objectIds.map((id, index) => [
-                            id,
-                            request.values[index],
-                          ]),
-                        ),
-                      }),
+type Write = Parameters<Notebook.Runtime["experimentalComm"]["send"]>[0];
+const start = Effect.fnUntraced(function* (
+  entry: Entry,
+  assetUrl: (path: string) => string,
+) {
+  const {
+    comm,
+    controller: { signal },
+  } = entry;
+  const renderer = yield* Effect.tryPromise(loadRenderer);
+  const lock = yield* Semaphore.make(1);
+  let updates: WidgetUpdates | undefined;
+
+  const apply = (notification: Parameters<RendererSession.Interface["handle"]>[0]) => {
+    const session = entry.state.session;
+    return session
+      ? Effect.tryPromise(() => session.handle(notification))
+      : Effect.void;
+  };
+  // The embedded marimo renderer calls these methods as ordinary browser promises.
+  const run = <A, E>(effect: Effect.Effect<A, E>) =>
+    signal.aborted
+      ? Promise.reject(new Error("The output session has ended."))
+      : Effect.runPromise(effect, { signal });
+
+  yield* comm.events.pipe(
+    Stream.merge(Stream.tick("30 seconds"), { haltStrategy: "left" }),
+    Stream.runForEach((event) =>
+      lock.withPermit(
+        Effect.gen(function* () {
+          if (!event) {
+            if (updates)
+              yield* Effect.forEach(
+                updates.expire(yield* Clock.currentTimeMillis),
+                apply,
+                { discard: true },
+              );
+            return;
+          }
+          if (event.kind === "reset") {
+            updates = undefined;
+            entry.state.session?.dispose();
+            publish(entry, { session: null, error: null });
+            return;
+          }
+          if (event.notification.op === "kernel-ready") {
+            entry.state.session?.dispose();
+            const runtimeId = event.runtimeId;
+            const local = new WidgetUpdates();
+            updates = local;
+            const send = Effect.fnUntraced(function* (write: Write) {
+              const receipt = local.begin(write);
+              yield* comm.send(write, receipt.key).pipe(
+                Effect.catch((error) =>
+                  lock.withPermit(
+                    Effect.gen(function* () {
+                      if (updates === local)
+                        yield* Effect.forEach(receipt.reject(), apply, {
+                          discard: true,
+                        });
+                      return yield* error;
+                    }),
+                  ),
+                ),
+              );
+              receipt.accept(yield* Clock.currentTimeMillis);
+            });
+            const session = renderer.createSession({
+              runtimeId,
+              assetUrl,
+              sendComponentValues: ({ objectIds, values }) =>
+                run(
+                  send({
+                    _tag: "SetValues",
+                    runtimeId,
+                    values: Object.fromEntries(
+                      objectIds.map((id, i) => [id, values[i]]),
                     ),
-                  invoke: (request) =>
-                    run(interactions.invoke({ ...request, runtimeId })),
-                  sendModelValue: (request) =>
-                    run(interactions.sendWidgetMessage({ ...request, runtimeId })),
-                });
-                entry.state = { session, error: null };
-                await session.handle(event.notification);
-                if (signal.aborted) {
-                  session.dispose();
-                  return;
-                }
-                publish(entry, { session, error: null });
-                return;
-              }
-              if (entry.state.session?.runtimeId === event.runtimeId)
-                await entry.state.session.handle(event.notification);
-            },
-            catch: (cause) =>
-              cause instanceof Error ? cause : new Error(String(cause)),
-          }),
-        ),
+                  }),
+                ),
+              invoke: ({ functionCallId, functionName, namespace, args }) =>
+                run(
+                  comm.invoke({
+                    call: functionCallId,
+                    name: functionName,
+                    namespace,
+                    args,
+                    runtimeId,
+                  }),
+                ),
+              sendModelValue: (request) =>
+                run(
+                  send({
+                    _tag: "Model",
+                    runtimeId,
+                    model: request.modelId,
+                    message: request.message,
+                    buffers: request.buffers,
+                  }),
+                ),
+            });
+            entry.state = { session, error: null };
+            local.receive(event.notification);
+            yield* apply(event.notification);
+            if (!signal.aborted) publish(entry, { session, error: null });
+          } else if (entry.state.session?.runtimeId === event.runtimeId) {
+            const change = updates?.receive(event.notification, event.requestId);
+            if (change) yield* apply(change);
+          }
+        }),
       ),
-      { signal },
-    );
-  } catch (cause) {
-    if (!signal.aborted) {
-      entry.state.session?.dispose();
-      publish(entry, {
-        session: null,
-        error: cause instanceof Error ? cause : new Error(String(cause)),
-      });
-    }
-  } finally {
-    if (!signal.aborted) {
-      entry.state.session?.dispose();
-      publish(entry, { ...entry.state, session: null });
-    }
-  }
-}
+    ),
+  );
+});

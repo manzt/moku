@@ -5,7 +5,9 @@ import * as Host from "@marimo-team/host-protocol/Host";
 import type * as NodeHttp from "node:http";
 import { readBody } from "./http.ts";
 
-const routes = Object.values(Host.Api.groups).flatMap((group) =>
+import { CommGroup } from "@moku/core/internal/comm-protocol";
+
+const routes = [...Object.values(Host.Api.groups), CommGroup].flatMap((group) =>
   Object.values(group.endpoints).map((endpoint: HttpApiEndpoint.Top) => {
     const names: string[] = [];
     const pattern = endpoint.path
@@ -39,8 +41,18 @@ export function match(method: string | undefined, path: string) {
   }
 }
 
+/** The declared JSON request body, in the form the proxy sends upstream. */
+function jsonPayload(endpoint: Pick<HttpApiEndpoint.Top, "payload">) {
+  const payload = endpoint.payload.get("application/json");
+  if (!payload) throw new Error("Expected a JSON request.");
+  return Schema.toEncoded(Schema.Union(payload.schemas.filter(Schema.isSchema)));
+}
+
 export async function prepare(
-  route: { endpoint: HttpApiEndpoint.Top; params: Record<string, string> },
+  route: {
+    endpoint: Pick<HttpApiEndpoint.Top, "params" | "query" | "headers" | "payload">;
+    params: Record<string, string>;
+  },
   req: NodeHttp.IncomingMessage,
   url: URL,
 ) {
@@ -56,10 +68,7 @@ export async function prepare(
     : {};
   let body: string | undefined;
   if (endpoint.payload.size > 0) {
-    const payload = endpoint.payload.get("application/json");
-    if (!payload) throw new Error("Expected a JSON request.");
-    const schema = Schema.Union(payload.schemas.filter(Schema.isSchema));
-    const value = Schema.decodeUnknownSync(Schema.toEncoded(schema), {
+    const value = Schema.decodeUnknownSync(jsonPayload(endpoint), {
       onExcessProperty: "error",
     })(await readBody(req, 8 * 1024 * 1024));
     body = JSON.stringify(value);

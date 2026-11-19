@@ -3,19 +3,25 @@
  *
  * @module
  */
+import type * as Model from "@moku/core/Notebook";
 import * as React from "react";
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 import * as RendererConnection from "./internal/RendererConnection.ts";
 import type * as RendererSession from "./internal/RendererSession.ts";
-import type * as Interaction from "@moku/core/Interaction";
 
-/** The subset of a notebook needed by output renderers. */
+/** The notebook that owns the displayed outputs. */
 export interface Notebook {
-  readonly runtime: Interaction.Interface;
+  /** The runtime that receives widget updates and function calls. */
+  readonly runtime: Pick<Model.Runtime, "experimentalComm">;
+  /** Resolves kernel-authored file references used in rendered output. */
+  readonly assetUrl: (path: string) => string;
 }
+/** Inputs for rendering interactive outputs from one notebook. */
 export interface ProviderProps {
+  /** The notebook that produced these outputs. */
   readonly notebook: Notebook;
+  /** Output views that can use the notebook’s widgets. */
   readonly children: React.ReactNode;
 }
 
@@ -25,12 +31,11 @@ export const OutputContext = React.createContext<{
 }>({ session: null, canInteract: false });
 
 /**
- * Supplies native widgets, function calls, and assets to descendant outputs.
+ * Connects descendant widgets to the runtime that produced their outputs.
  *
- * Outputs must include their producing `runtimeId` to enable interaction.
- * Providers for the same notebook share a connection. The embedded renderer
- * currently supports one interactive notebook per page; unmounting its last
- * provider releases the connection and clears its widget registries.
+ * Pass the producing `runtimeId` with each output. After a kernel restart,
+ * older outputs stay disconnected. Providers on a page can share one notebook.
+ * Unmounting the last provider releases its widgets.
  *
  * @example Render a selected execution
  * ```tsx
@@ -40,13 +45,11 @@ export const OutputContext = React.createContext<{
  * ```
  */
 export function Provider({ notebook, children }: ProviderProps) {
-  const interactions = notebook.runtime;
-  const connection = useAtomValue(interactions.state, (state) => state.connection);
+  const comm = notebook.runtime.experimentalComm;
+  const { assetUrl } = notebook;
+  const connection = useAtomValue(comm.connection);
   const [reconnecting, reconnect] = useAtom(
-    React.useMemo(
-      () => Atom.fn(() => interactions.retry).pipe(Atom.setIdleTTL(0)),
-      [interactions],
-    ),
+    React.useMemo(() => Atom.fn(() => comm.retry).pipe(Atom.setIdleTTL(0)), [comm]),
   );
   const [state, setState] = React.useState<RendererConnection.State>({
     session: null,
@@ -54,14 +57,14 @@ export function Provider({ notebook, children }: ProviderProps) {
   });
   React.useEffect(() => {
     try {
-      return RendererConnection.acquire(interactions, setState);
+      return RendererConnection.acquire(comm, assetUrl, setState);
     } catch (cause) {
       setState({
         session: null,
         error: cause instanceof Error ? cause : new Error(String(cause)),
       });
     }
-  }, [interactions]);
+  }, [comm, assetUrl]);
   const error = state.error ?? (connection._tag === "Failed" ? connection.error : null);
   const canInteract = connection._tag === "Connected" && connection.canInteract;
   return (

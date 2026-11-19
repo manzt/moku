@@ -34,8 +34,15 @@ export interface State {
 export interface Options {
   /** The host protocol API base URL, including its versioned path. */
   readonly baseUrl: string | URL;
-  /** Bearer credential supplied with requests to this host. */
+  /** Bearer token sent to the host protocol API, including its event streams. */
   readonly token?: Redacted.Redacted<string>;
+  /**
+   * Base URL for widget requests when the notebook lacks the experimental comm operation.
+   *
+   * The launcher supplies its output proxy here. The injected HTTP client
+   * posts to `/auth` before opening `/sse` and sending requests to `/api/kernel`.
+   */
+  readonly marimoBaseUrl?: URL;
   /** Maximum retry interval after an uncertain response. Defaults to 60 seconds; use a value shorter than the host's documented retention window. */
   readonly retryWindow?: Duration.Input;
 }
@@ -164,6 +171,7 @@ export const make = Effect.fnUntraced(function* (
   never,
   HttpClient.HttpClient | AtomRegistry.AtomRegistry | Scope.Scope
 > {
+  const http = yield* HttpClient.HttpClient;
   const client = yield* makeClient(options);
   const registry = yield* AtomRegistry.AtomRegistry;
   let closed = false;
@@ -173,12 +181,6 @@ export const make = Effect.fnUntraced(function* (
     }),
   );
   const commands = yield* makeCommands(options.retryWindow);
-  const notebooks = yield* RcMap.make({
-    lookup: (id: string) =>
-      NotebookModel.make(client, id, options.retryWindow).pipe(
-        Effect.provideService(AtomRegistry.AtomRegistry, registry),
-      ),
-  });
   const observation = yield* observe({
     initial: empty,
     reduce,
@@ -189,6 +191,21 @@ export const make = Effect.fnUntraced(function* (
         query: {},
         headers: cursor === undefined ? {} : { cursor },
       }),
+  });
+  const notebooks = yield* RcMap.make({
+    lookup: (id: string) =>
+      NotebookModel.make(
+        client,
+        id,
+        options.retryWindow,
+        options.marimoBaseUrl && {
+          baseUrl: options.marimoBaseUrl,
+          catalog: observation.state,
+        },
+      ).pipe(
+        Effect.provideService(HttpClient.HttpClient, http),
+        Effect.provideService(AtomRegistry.AtomRegistry, registry),
+      ),
   });
   const params = (id: string) =>
     Schema.decodeUnknownEffect(Protocol.NotebookId)(id).pipe(
